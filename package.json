@@ -1,0 +1,35 @@
+{
+  "name": "nexusapp-cli",
+  "version": "1.2.5",
+  "description": "NEXUS AI command-line interface",
+  "main": "dist/index.js",
+  "bin": {
+    "nexus": "./bin/nexus"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "nexusai",
+    "cli",
+    "deployments",
+    "cloud"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "chalk": "^5.3.0",
+    "cli-table3": "^0.6.3",
+    "commander": "^12.0.0",
+    "inquirer": "^9.2.0",
+    "nexusapp-cli": "^1.2.3",
+    "ora": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/inquirer": "^9.0.7",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
