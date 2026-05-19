@@ -1,4 +1,5 @@
 import { randomBytes } from 'crypto';
+import { readFileSync } from 'fs';
 import { Command } from 'commander';
 import inquirer from 'inquirer';
 import { client, apiError, unwrap } from '../client.js';
@@ -46,6 +47,40 @@ async function pollUntilDone(deploymentId: string, spin: ReturnType<typeof spinn
       return;
     }
   }
+}
+
+/**
+ * Parse a .env-style file into a key→value map.
+ * Supports: KEY=VALUE, KEY="quoted value", KEY='quoted value', # comments, blank lines.
+ * --env pairs always win over file values (caller merges file first, then pairs).
+ */
+function parseEnvFile(filePath: string): Record<string, string> {
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, 'utf8');
+  } catch {
+    errorMsg(`Cannot read env file: ${filePath}`);
+    process.exit(1);
+  }
+  const result: Record<string, string> = {};
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx <= 0) continue;
+    const key = trimmed.slice(0, idx).trim();
+    let val = trimmed.slice(idx + 1);
+    // Strip inline comments after unquoted values
+    if ((val.startsWith('"') && val.includes('"', 1)) || (val.startsWith("'") && val.includes("'", 1))) {
+      const q = val[0];
+      const close = val.indexOf(q, 1);
+      val = val.slice(1, close);
+    } else {
+      val = val.split('#')[0].trim();
+    }
+    if (key) result[key] = val;
+  }
+  return result;
 }
 
 export function registerDeploy(program: Command): void {
@@ -126,11 +161,13 @@ export function registerDeploy(program: Command): void {
     .option('--project <id>', 'Project ID')
     .option('--provider <provider>', 'Provider (docker|gcp_cloud_run|aws_ecs_fargate|azure_container_apps)')
     .option('--env <pairs...>', 'Environment variables as KEY=VALUE')
+    .option('--env-file <file>', 'Load environment variables from a .env file')
     .option('--no-health-check', 'Disable health checks for this deployment')
     .option('--wait', 'Wait until deployment is RUNNING or FAILED')
     .option('--json', 'Output raw JSON')
     .action(async (opts) => {
       const envVars: Record<string, string> = {};
+      if (opts.envFile) Object.assign(envVars, parseEnvFile(opts.envFile));
       if (opts.env) {
         for (const pair of opts.env) {
           const idx = pair.indexOf('=');
@@ -170,6 +207,7 @@ export function registerDeploy(program: Command): void {
     .option('--branch <branch>', 'Git branch')
     .option('--provider <provider>', 'Provider (docker|gcp_cloud_run|aws_ecs_fargate|azure_container_apps)')
     .option('--env <pairs...>', 'Environment variables as KEY=VALUE')
+    .option('--env-file <file>', 'Load environment variables from a .env file')
     .option('--framework <framework>', 'Framework hint (e.g. node, python, go)')
     .option('--build-command <cmd>', 'Custom build command')
     .option('--start-command <cmd>', 'Custom start command')
@@ -184,6 +222,7 @@ export function registerDeploy(program: Command): void {
     .option('--json', 'Output raw JSON')
     .action(async (opts) => {
       const envVars: Record<string, string> = {};
+      if (opts.envFile) Object.assign(envVars, parseEnvFile(opts.envFile));
       if (opts.env) {
         for (const pair of opts.env) {
           const idx = pair.indexOf('=');
@@ -231,6 +270,7 @@ export function registerDeploy(program: Command): void {
     .option('--name <name>', 'Override deployment name')
     .option('--provider <provider>', 'Override provider')
     .option('--env <pairs...>', 'Override / add environment variables as KEY=VALUE')
+    .option('--env-file <file>', 'Load environment variables from a .env file (merged with existing, --env wins)')
     .option('--wait', 'Wait until deployment is RUNNING or FAILED')
     .option('--yes', 'Skip confirmation prompt')
     .option('--json', 'Output raw JSON')
@@ -251,6 +291,7 @@ export function registerDeploy(program: Command): void {
       }
 
       const baseEnvVars: Record<string, string> = { ...(deployment.envVars || {}) };
+      if (opts.envFile) Object.assign(baseEnvVars, parseEnvFile(opts.envFile));
       if (opts.env) {
         for (const pair of (opts.env as string[])) {
           const idx = pair.indexOf('=');
@@ -503,6 +544,7 @@ export function registerDeploy(program: Command): void {
     .option('--claude-web-cookie <cookie>', 'CLAUDE_WEB_COOKIE value')
     .option('--provider <provider>', 'Provider (docker|gcp_cloud_run|aws_ecs_fargate|azure_container_apps)')
     .option('--env <pairs...>', 'Additional environment variables as KEY=VALUE')
+    .option('--env-file <file>', 'Load environment variables from a .env file')
     .option('--wait', 'Wait until deployment is RUNNING or FAILED')
     .option('--json', 'Output raw JSON')
     .action(async (opts) => {
@@ -516,6 +558,7 @@ export function registerDeploy(program: Command): void {
       if (opts.claudeApiKey) envVars['CLAUDE_AI_SESSION_KEY'] = opts.claudeApiKey;
       if (opts.claudeWebSession) envVars['CLAUDE_WEB_SESSION_KEY'] = opts.claudeWebSession;
       if (opts.claudeWebCookie) envVars['CLAUDE_WEB_COOKIE'] = opts.claudeWebCookie;
+      if (opts.envFile) Object.assign(envVars, parseEnvFile(opts.envFile));
       if (opts.env) {
         for (const pair of opts.env as string[]) {
           const idx = pair.indexOf('=');
@@ -527,7 +570,7 @@ export function registerDeploy(program: Command): void {
         port: 18789,
         name: opts.name,
         envVars,
-        startCommand: 'mkdir -p /home/node/.openclaw && echo \'{"gateway":{"controlUi":{"dangerouslyAllowHostHeaderOriginFallback":true}}}\' > /home/node/.openclaw/openclaw.json && node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured',
+        startCommand: 'mkdir -p /home/node/.openclaw && echo \'{"gateway":{"controlUi":{"dangerouslyAllowHostHeaderOriginFallback":true,"dangerouslyDisableDeviceAuth":true},"trustedProxies":["172.16.0.0/12","10.0.0.0/8"]}}\' > /home/node/.openclaw/openclaw.json && node dist/index.js gateway --bind lan --port 18789 --allow-unconfigured',
         healthCheckEnabled: false, // OpenClaw gateway has no HTTP health endpoint
       };
       if (opts.provider) payload.provider = opts.provider;
@@ -543,6 +586,88 @@ export function registerDeploy(program: Command): void {
           success(`OpenClaw gateway queued: ${d.name || d.id}`);
           console.log(`  Gateway token: ${gatewayToken}`);
           console.log(`  Port: 18789`);
+          console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
+        }
+      } catch (err) {
+        errorMsg(apiError(err));
+        process.exit(1);
+      }
+    });
+
+  // flixty
+  deploy
+    .command('flixty')
+    .description('Deploy Flixty social media creator studio from source (github.com/nexusrun/flixty)')
+    .option('--name <name>', 'Deployment name', 'flixty')
+    .option('--session-secret <secret>', 'Express session secret (auto-generated if not set)')
+    .option('--base-url <url>', 'Public URL of the deployment (for OAuth redirect URIs)')
+    .option('--anthropic-api-key <key>', 'Anthropic API key for AI Assist')
+    .option('--x-client-id <id>', 'X/Twitter OAuth 2.0 Client ID')
+    .option('--x-client-secret <secret>', 'X/Twitter OAuth 2.0 Client Secret')
+    .option('--linkedin-client-id <id>', 'LinkedIn OAuth Client ID')
+    .option('--linkedin-client-secret <secret>', 'LinkedIn OAuth Client Secret')
+    .option('--fb-app-id <id>', 'Facebook App ID')
+    .option('--fb-app-secret <secret>', 'Facebook App Secret')
+    .option('--tiktok-client-key <key>', 'TikTok Client Key')
+    .option('--tiktok-client-secret <secret>', 'TikTok Client Secret')
+    .option('--google-client-id <id>', 'Google Client ID (YouTube)')
+    .option('--google-client-secret <secret>', 'Google Client Secret')
+    .option('--provider <provider>', 'Provider (docker|gcp_cloud_run|aws_ecs_fargate|azure_container_apps)')
+    .option('--env <pairs...>', 'Additional environment variables as KEY=VALUE')
+    .option('--env-file <file>', 'Load environment variables from a .env file')
+    .option('--wait', 'Wait until deployment is RUNNING or FAILED')
+    .option('--json', 'Output raw JSON')
+    .action(async (opts) => {
+      const sessionSecret = opts.sessionSecret || randomBytes(32).toString('hex');
+      const envVars: Record<string, string> = {
+        SESSION_SECRET: sessionSecret,
+        PORT: '3000',
+        NODE_ENV: 'production',
+      };
+      if (opts.baseUrl) envVars['BASE_URL'] = opts.baseUrl;
+      if (opts.anthropicApiKey) envVars['ANTHROPIC_API_KEY'] = opts.anthropicApiKey;
+      if (opts.xClientId) envVars['X_CLIENT_ID'] = opts.xClientId;
+      if (opts.xClientSecret) envVars['X_CLIENT_SECRET'] = opts.xClientSecret;
+      if (opts.linkedinClientId) envVars['LINKEDIN_CLIENT_ID'] = opts.linkedinClientId;
+      if (opts.linkedinClientSecret) envVars['LINKEDIN_CLIENT_SECRET'] = opts.linkedinClientSecret;
+      if (opts.fbAppId) envVars['FB_APP_ID'] = opts.fbAppId;
+      if (opts.fbAppSecret) envVars['FB_APP_SECRET'] = opts.fbAppSecret;
+      if (opts.tiktokClientKey) envVars['TIKTOK_CLIENT_KEY'] = opts.tiktokClientKey;
+      if (opts.tiktokClientSecret) envVars['TIKTOK_CLIENT_SECRET'] = opts.tiktokClientSecret;
+      if (opts.googleClientId) envVars['GOOGLE_CLIENT_ID'] = opts.googleClientId;
+      if (opts.googleClientSecret) envVars['GOOGLE_CLIENT_SECRET'] = opts.googleClientSecret;
+      if (opts.envFile) Object.assign(envVars, parseEnvFile(opts.envFile));
+      if (opts.env) {
+        for (const pair of opts.env as string[]) {
+          const idx = pair.indexOf('=');
+          if (idx > 0) envVars[pair.slice(0, idx)] = pair.slice(idx + 1);
+        }
+      }
+      const payload: Record<string, any> = {
+        sourceType: 'repo',
+        repoUrl: 'https://github.com/nexusrun/flixty.git',
+        name: opts.name,
+        environment: 'PRODUCTION',
+        startCommand: 'node server.js',
+        envVars,
+        healthCheckEnabled: true,
+      };
+      if (opts.provider) payload.provider = opts.provider;
+
+      try {
+        const res = await client.post('/api/gpt/deploy/source', payload);
+        const d = res.data;
+        if (opts.json) { printJson({ ...d, sessionSecret }); return; }
+        if (opts.wait) {
+          const spin = spinner('Deploying Flixty...');
+          await pollUntilDone(d.id, spin);
+        } else {
+          success(`Flixty queued: ${d.name || d.id}`);
+          console.log(`  Session secret: ${sessionSecret}`);
+          console.log(`  Port: 3000`);
+          if (!opts.baseUrl) {
+            console.log(`  Note: once running, redeploy with --base-url <public-url> for OAuth to work`);
+          }
           console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
         }
       } catch (err) {

@@ -25,6 +25,11 @@ async function resolveDeployment(nameOrId: string): Promise<any> {
   return unwrap(res.data);
 }
 
+function isInternalDeploymentImage(image?: string): boolean {
+  if (!image) return false;
+  return /^deploy-[0-9a-f-]+(?::|$)/i.test(image.trim());
+}
+
 async function pollUntilDone(deploymentId: string, spin: ReturnType<typeof spinner>): Promise<void> {
   const terminal = new Set(['RUNNING', 'FAILED', 'TERMINATED', 'STOPPED']);
   while (true) {
@@ -217,6 +222,9 @@ export function registerDeploy(program: Command): void {
     .option('--repo-secret <name>', 'Secret name containing private repo token')
     .option('--environment <env>', 'Deployment environment (DEVELOPMENT|STAGING|PRODUCTION)', 'DEVELOPMENT')
     .option('--auto-destroy <hours>', 'Auto-destroy after N hours', parseInt)
+    .option('--services <types>', 'Comma-separated database services to provision (e.g. postgresql,redis)')
+    .option('--worker-command <cmd>', 'Run a background worker sidecar with this command')
+    .option('--worker-name <name>', 'Worker service name', 'worker')
     .option('--no-health-check', 'Disable health checks for this deployment')
     .option('--wait', 'Wait until deployment is RUNNING or FAILED')
     .option('--json', 'Output raw JSON')
@@ -243,6 +251,19 @@ export function registerDeploy(program: Command): void {
       if (opts.repoSecret) payload.repoSecretName = opts.repoSecret;
       if (opts.autoDestroy) payload.autoDestroyHours = opts.autoDestroy;
       if (opts.healthCheck === false) payload.healthCheckEnabled = false;
+      if (opts.services) {
+        payload.services = opts.services.split(',').map((s: string) => ({ type: s.trim() }));
+      }
+      if (opts.workerCommand) {
+        payload.services = [
+          ...(payload.services || []),
+          {
+            type: 'worker',
+            displayName: opts.workerName || 'worker',
+            command: opts.workerCommand,
+          },
+        ];
+      }
       if (Object.keys(envVars).length) payload.envVars = envVars;
 
       try {
@@ -301,32 +322,15 @@ export function registerDeploy(program: Command): void {
       const provider = opts.provider || undefined;
 
       try {
-        if (deployment.imageName) {
-          const payload: Record<string, any> = {
-            image: deployment.imageName,
-            port: deployment.port,
-            name: opts.name || `${deployment.name}-redeploy`,
-          };
-          if (provider) payload.provider = provider;
-          if (Object.keys(baseEnvVars).length) payload.envVars = baseEnvVars;
-
-          const res = await client.post('/api/gpt/deploy', payload);
-          const d = res.data;
-          if (opts.json) { printJson(d); return; }
-          if (opts.wait) {
-            await pollUntilDone(d.id, spinner(`Redeploying ${d.name || nameOrId}...`));
-          } else {
-            success(`Redeploy queued: ${d.name || d.id}`);
-            console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
-          }
-          return;
+        let project: any = null;
+        if (deployment.projectId) {
+          const projectRes = await client.get(`/api/projects/${deployment.projectId}`);
+          project = unwrap(projectRes.data);
         }
 
-        // Source deployment — look up repo from project
-        const projectRes = await client.get(`/api/projects/${deployment.projectId}`);
-        const project = unwrap(projectRes.data);
+        const hasAttachedServices = Array.isArray(deployment.services) && deployment.services.length > 0;
 
-        if (project.repoUrl) {
+        if (project?.repoUrl && !(hasAttachedServices && deployment.code)) {
           const payload: Record<string, any> = {
             sourceType: 'repo',
             repoUrl: project.repoUrl,
@@ -345,6 +349,61 @@ export function registerDeploy(program: Command): void {
           } else {
             success(`Redeploy queued: ${d.name || d.id}`);
             console.log(`  Repo: ${project.repoUrl}${project.gitBranch ? ` @ ${project.gitBranch}` : ''}`);
+            console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
+          }
+          return;
+        }
+
+        if (deployment.code) {
+          const payload: Record<string, any> = {
+            deploymentId: deployment.id,
+            projectId: deployment.projectId,
+            name: opts.name || `${deployment.name}-redeploy`,
+            displayName: opts.name || `Redeploy of ${deployment.displayName || deployment.name}`,
+            code: deployment.code,
+            dockerfile: deployment.dockerfile,
+            deploymentProvider: provider || deployment.provider,
+            environment: deployment.environment,
+            healthCheckEnabled: deployment.healthCheckEnabled,
+            healthCheckType: deployment.healthCheckType,
+            healthCheckUrl: deployment.healthCheckUrl,
+          };
+          if (hasAttachedServices) {
+            payload.services = deployment.services.map((service: any) => ({
+              type: service.serviceType,
+              displayName: service.displayName,
+            }));
+          }
+          if (Object.keys(baseEnvVars).length) payload.envVars = baseEnvVars;
+
+          const res = await client.post('/api/deployments', payload);
+          const d = unwrap(res.data);
+          if (opts.json) { printJson(d); return; }
+          if (opts.wait) {
+            await pollUntilDone(d.id, spinner(`Redeploying ${d.name || nameOrId}...`));
+          } else {
+            success(`Redeploy queued: ${d.name || d.id}`);
+            console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
+          }
+          return;
+        }
+
+        if (deployment.imageName && !isInternalDeploymentImage(deployment.imageName)) {
+          const payload: Record<string, any> = {
+            image: deployment.imageName,
+            port: deployment.port,
+            name: opts.name || `${deployment.name}-redeploy`,
+          };
+          if (provider) payload.provider = provider;
+          if (Object.keys(baseEnvVars).length) payload.envVars = baseEnvVars;
+
+          const res = await client.post('/api/gpt/deploy', payload);
+          const d = res.data;
+          if (opts.json) { printJson(d); return; }
+          if (opts.wait) {
+            await pollUntilDone(d.id, spinner(`Redeploying ${d.name || nameOrId}...`));
+          } else {
+            success(`Redeploy queued: ${d.name || d.id}`);
             console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
           }
           return;
@@ -612,7 +671,7 @@ export function registerDeploy(program: Command): void {
     .option('--tiktok-client-secret <secret>', 'TikTok Client Secret')
     .option('--google-client-id <id>', 'Google Client ID (YouTube)')
     .option('--google-client-secret <secret>', 'Google Client Secret')
-    .option('--provider <provider>', 'Provider (gcp_cloud_run|aws_ecs_fargate|azure_container_apps)')
+    .option('--provider <provider>', 'Provider (docker|gcp_cloud_run|aws_ecs_fargate|azure_container_apps)')
     .option('--env <pairs...>', 'Additional environment variables as KEY=VALUE')
     .option('--env-file <file>', 'Load environment variables from a .env file')
     .option('--wait', 'Wait until deployment is RUNNING or FAILED')
@@ -655,7 +714,7 @@ export function registerDeploy(program: Command): void {
       if (opts.provider) payload.provider = opts.provider;
 
       try {
-        const res = await client.post('/api/gpt/deploy-source', payload);
+        const res = await client.post('/api/gpt/deploy/source', payload);
         const d = res.data;
         if (opts.json) { printJson({ ...d, sessionSecret }); return; }
         if (opts.wait) {
