@@ -1,35 +1,24 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
-import { registerAuth } from './commands/auth.js';
-import { registerDeploy } from './commands/deploy.js';
-import { registerSecret } from './commands/secret.js';
-import { registerProject } from './commands/project.js';
-import { registerDomain } from './commands/domain.js';
-import { registerToken } from './commands/token.js';
-import { registerMember } from './commands/member.js';
-import { registerDatabase } from './commands/database.js';
-import { registerVolume } from './commands/volume.js';
-import { registerBucket } from './commands/bucket.js';
+import { buildProgram } from './program.js';
 
-const program = new Command();
+async function main(): Promise<void> {
+  // No command given: show the branded welcome screen, then drop into the
+  // interactive shell when attached to a terminal. Piped/CI use (no TTY) just
+  // prints the banner and exits so nothing hangs waiting on input.
+  if (process.argv.length <= 2) {
+    const { showWelcome } = await import('./banner.js');
+    await showWelcome();
+    if (process.stdin.isTTY) {
+      const { startRepl } = await import('./repl.js');
+      await startRepl(buildProgram);
+    }
+    return;
+  }
 
-program
-  .name('nexus')
-  .description('NEXUS AI command-line interface')
-  .version('1.0.0');
+  await buildProgram().parseAsync(process.argv);
+}
 
-registerAuth(program);
-registerDeploy(program);
-registerSecret(program);
-registerProject(program);
-registerDomain(program);
-registerToken(program);
-registerMember(program);
-registerDatabase(program);
-registerVolume(program);
-registerBucket(program);
-
-program.parseAsync(process.argv).catch((err) => {
+main().catch((err) => {
   console.error(err.message || String(err));
   process.exit(1);
 });

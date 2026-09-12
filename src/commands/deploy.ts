@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync, statSync } from 'fs';
 import { Command } from 'commander';
+import axios from 'axios';
 import inquirer from 'inquirer';
 import { client, apiError, unwrap } from '../client.js';
 import { statusBadge, printTable, printJson, spinner, timeAgo, success, errorMsg } from '../output.js';
@@ -23,6 +24,76 @@ async function resolveDeployment(nameOrId: string): Promise<any> {
   // Fetch full record for the resolved ID
   const res = await client.get(`/api/deployments/${match.id}`);
   return unwrap(res.data);
+}
+
+/**
+ * --dockerfile accepts inline contents, a URL, a local file, or a repo-relative
+ * path. Resolve to { dockerfile } (contents) or { dockerfilePath } (resolved
+ * server-side after the repo is cloned). Exits with a clear error on failure.
+ */
+async function resolveDockerfileOption(
+  value: string
+): Promise<{ dockerfile?: string; dockerfilePath?: string }> {
+  const trimmed = value.trim();
+  if (!trimmed) return {};
+
+  // Inline Dockerfile contents (e.g. --dockerfile "$(cat Dockerfile)")
+  if (trimmed.includes('\n') || /^(FROM|ARG)\s/i.test(trimmed)) {
+    return { dockerfile: value };
+  }
+
+  // URL: fetch it here so the user gets a clear error, not a failed build
+  if (/^https?:\/\//i.test(trimmed)) {
+    // Rewrite GitHub file-view URLs to their raw form
+    const url = trimmed.replace(
+      /^https?:\/\/(?:www\.)?github\.com\/([^/]+)\/([^/]+)\/blob\/(.+)$/i,
+      'https://raw.githubusercontent.com/$1/$2/$3'
+    );
+    try {
+      const res = await axios.get(url, { responseType: 'text', timeout: 15000, transformResponse: [(d) => d] });
+      const content = String(res.data || '');
+      if (!/^\s*(?:FROM|ARG)\s+\S+/im.test(content)) {
+        errorMsg(`The URL did not return a Dockerfile (no FROM instruction found): ${url}`);
+        process.exit(1);
+      }
+      return { dockerfile: content };
+    } catch (err: any) {
+      const status = err?.response?.status;
+      errorMsg(`Failed to fetch Dockerfile from ${url}${status ? ` (HTTP ${status})` : ''}`);
+      process.exit(1);
+    }
+  }
+
+  // Local file on this machine
+  if (existsSync(trimmed) && statSync(trimmed).isFile()) {
+    return { dockerfile: readFileSync(trimmed, 'utf8') };
+  }
+
+  // Otherwise: a path inside the repo, read by the platform after cloning
+  return { dockerfilePath: trimmed };
+}
+
+function isInternalDeploymentImage(image?: string): boolean {
+  if (!image) return false;
+  return /^deploy-[0-9a-f-]+(?::|$)/i.test(image.trim());
+}
+
+function parseDurationToDate(value: string): Date {
+  const match = value.match(/^(\d+(?:\.\d+)?)(m|h|d)$/);
+  if (!match) {
+    throw new Error(`Invalid duration "${value}". Use format like: 30m, 4h, 2d`);
+  }
+  const amount = Number(match[1]);
+  const unit = match[2];
+  const msMap: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000 };
+  return new Date(Date.now() + amount * msMap[unit]);
+}
+
+function formatAutoDestroy(value?: string | null): string {
+  if (!value) return 'disabled';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return `${date.toISOString()} (${timeAgo(value)})`;
 }
 
 async function pollUntilDone(deploymentId: string, spin: ReturnType<typeof spinner>): Promise<void> {
@@ -141,6 +212,7 @@ export function registerDeploy(program: Command): void {
           ['Port', String(d.port || '—')],
           ['URL', d.url || d.serviceUrl || '—'],
           ['Replicas', String(d.replicas ?? '—')],
+          ['Auto Destroy', formatAutoDestroy(d.autoDestroyAt)],
           ['Project', d.projectId || '—'],
           ['Created', d.createdAt ? timeAgo(d.createdAt) : '—'],
           ['Updated', d.updatedAt ? timeAgo(d.updatedAt) : '—'],
@@ -206,6 +278,7 @@ export function registerDeploy(program: Command): void {
     .option('--name <name>', 'Deployment name')
     .option('--branch <branch>', 'Git branch')
     .option('--provider <provider>', 'Provider (docker|gcp_cloud_run|aws_ecs_fargate|azure_container_apps)')
+    .option('--region <region>', 'Cloud region to deploy into (e.g. us-central1, canadacentral)')
     .option('--env <pairs...>', 'Environment variables as KEY=VALUE')
     .option('--env-file <file>', 'Load environment variables from a .env file')
     .option('--framework <framework>', 'Framework hint (e.g. node, python, go)')
@@ -213,10 +286,17 @@ export function registerDeploy(program: Command): void {
     .option('--start-command <cmd>', 'Custom start command')
     .option('--install-command <cmd>', 'Custom install command')
     .option('--output-dir <dir>', 'Build output directory')
-    .option('--dockerfile <path>', 'Path to Dockerfile in repo')
+    .option('--dockerfile <path-or-url-or-content>', 'Dockerfile to use: repo-relative path, local file, URL, or inline contents')
     .option('--repo-secret <name>', 'Secret name containing private repo token')
     .option('--environment <env>', 'Deployment environment (DEVELOPMENT|STAGING|PRODUCTION)', 'DEVELOPMENT')
     .option('--auto-destroy <hours>', 'Auto-destroy after N hours', parseInt)
+    .option('--services <types>', 'Comma-separated services (e.g. postgres,redis). On cloud providers a database (postgres|mysql) is provisioned as a managed DB; on docker it runs as a sidecar container')
+    .option('--create-db <engine>', 'Alias for --services with a single database (postgres|mysql); provisions a managed cloud DB and injects its connection env')
+    .option('--managed-db <id>', 'Attach an existing managed database by ID and inject its connection env')
+    .option('--db-version <version>', 'Engine version for --create-db (default: postgres 17 / mysql 8.0)')
+    .option('--db-region <region>', 'Cloud region for --create-db (defaults to the deploy region)')
+    .option('--worker-command <cmd>', 'Run a background worker sidecar with this command')
+    .option('--worker-name <name>', 'Worker service name', 'worker')
     .option('--no-health-check', 'Disable health checks for this deployment')
     .option('--wait', 'Wait until deployment is RUNNING or FAILED')
     .option('--json', 'Output raw JSON')
@@ -233,16 +313,34 @@ export function registerDeploy(program: Command): void {
       if (opts.name) payload.name = opts.name;
       if (opts.branch) payload.repoBranch = opts.branch;
       if (opts.provider) payload.provider = opts.provider;
+      if (opts.region) payload.region = opts.region;
       if (opts.environment) payload.environment = opts.environment;
       if (opts.framework) payload.framework = opts.framework;
       if (opts.buildCommand) payload.buildCommand = opts.buildCommand;
       if (opts.startCommand) payload.startCommand = opts.startCommand;
       if (opts.installCommand) payload.installCommand = opts.installCommand;
       if (opts.outputDir) payload.outputDir = opts.outputDir;
-      if (opts.dockerfile) payload.dockerfile = opts.dockerfile;
+      if (opts.dockerfile) Object.assign(payload, await resolveDockerfileOption(opts.dockerfile));
       if (opts.repoSecret) payload.repoSecretName = opts.repoSecret;
       if (opts.autoDestroy) payload.autoDestroyHours = opts.autoDestroy;
       if (opts.healthCheck === false) payload.healthCheckEnabled = false;
+      if (opts.createDb) payload.createDb = opts.createDb;
+      if (opts.managedDb) payload.managedDbId = opts.managedDb;
+      if (opts.dbVersion) payload.dbEngineVersion = opts.dbVersion;
+      if (opts.dbRegion) payload.dbRegion = opts.dbRegion;
+      if (opts.services) {
+        payload.services = opts.services.split(',').map((s: string) => ({ type: s.trim() }));
+      }
+      if (opts.workerCommand) {
+        payload.services = [
+          ...(payload.services || []),
+          {
+            type: 'worker',
+            displayName: opts.workerName || 'worker',
+            command: opts.workerCommand,
+          },
+        ];
+      }
       if (Object.keys(envVars).length) payload.envVars = envVars;
 
       try {
@@ -290,43 +388,69 @@ export function registerDeploy(program: Command): void {
         if (!confirm) { console.log('Cancelled.'); return; }
       }
 
-      const baseEnvVars: Record<string, string> = { ...(deployment.envVars || {}) };
-      if (opts.envFile) Object.assign(baseEnvVars, parseEnvFile(opts.envFile));
+      // Env the USER explicitly provides on this redeploy (--env-file / --env).
+      // Kept separate from the deployment's existing env: the API masks secret
+      // values in responses, so re-sending deployment.envVars would overwrite real
+      // values with "***". The in-place redeploy preserves existing env
+      // server-side, so we only send explicit overrides.
+      const explicitOverrides: Record<string, string> = {};
+      if (opts.envFile) Object.assign(explicitOverrides, parseEnvFile(opts.envFile));
       if (opts.env) {
         for (const pair of (opts.env as string[])) {
           const idx = pair.indexOf('=');
-          if (idx > 0) baseEnvVars[pair.slice(0, idx)] = pair.slice(idx + 1);
+          if (idx > 0) explicitOverrides[pair.slice(0, idx)] = pair.slice(idx + 1);
         }
       }
+      // For the legacy "reconstruct as a new deployment" fallback only, start from
+      // the deployment's env. The API masks secret values ("***" or user:***@ in
+      // connection strings); re-sending those would bake literal "***" into the
+      // clone, so drop masked entries (the server regenerates service credentials
+      // and DATABASE_URL for attached services anyway).
+      const baseEnvVars: Record<string, string> = {};
+      for (const [k, v] of Object.entries((deployment.envVars || {}) as Record<string, string>)) {
+        if (v === '***' || /:\/\/[^:/@\s]+:\*\*\*@/.test(String(v))) continue;
+        baseEnvVars[k] = v;
+      }
+      Object.assign(baseEnvVars, explicitOverrides);
       const provider = opts.provider || undefined;
 
       try {
-        if (deployment.imageName) {
-          const payload: Record<string, any> = {
-            image: deployment.imageName,
-            port: deployment.port,
-            name: opts.name || `${deployment.name}-redeploy`,
-          };
-          if (provider) payload.provider = provider;
-          if (Object.keys(baseEnvVars).length) payload.envVars = baseEnvVars;
-
-          const res = await client.post('/api/gpt/deploy', payload);
-          const d = res.data;
-          if (opts.json) { printJson(d); return; }
-          if (opts.wait) {
-            await pollUntilDone(d.id, spinner(`Redeploying ${d.name || nameOrId}...`));
-          } else {
-            success(`Redeploy queued: ${d.name || d.id}`);
-            console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
+        // Default: rebuild the SAME deployment in place. This preserves
+        // everything keyed by deployment id — attached managed databases,
+        // volumes, secrets — so "deploy -> attach db -> redeploy" injects the DB
+        // on the rebuild. Renaming or switching provider can't be done in place,
+        // so only the no-override path uses it; anything the server rejects
+        // (zip/folder source, no prior job) falls through to the legacy flow.
+        if (!opts.name && !provider) {
+          try {
+            const body: Record<string, any> = {};
+            // Only send explicit overrides — the server preserves existing env.
+            if (Object.keys(explicitOverrides).length) body.envVars = explicitOverrides;
+            const res = await client.post(`/api/deployments/${deployment.id}/redeploy`, body);
+            const d = unwrap(res.data);
+            if (opts.json) { printJson(d); return; }
+            if (opts.wait) {
+              await pollUntilDone(d.id, spinner(`Rebuilding ${d.name || nameOrId}...`));
+            } else {
+              success(`Redeploy queued (in place): ${d.name || d.id}`);
+              console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
+            }
+            return;
+          } catch (err: any) {
+            const status = err?.response?.status;
+            if (status !== 400 && status !== 404) throw err;
           }
-          return;
         }
 
-        // Source deployment — look up repo from project
-        const projectRes = await client.get(`/api/projects/${deployment.projectId}`);
-        const project = unwrap(projectRes.data);
+        let project: any = null;
+        if (deployment.projectId) {
+          const projectRes = await client.get(`/api/projects/${deployment.projectId}`);
+          project = unwrap(projectRes.data);
+        }
 
-        if (project.repoUrl) {
+        const hasAttachedServices = Array.isArray(deployment.services) && deployment.services.length > 0;
+
+        if (project?.repoUrl && !(hasAttachedServices && deployment.code)) {
           const payload: Record<string, any> = {
             sourceType: 'repo',
             repoUrl: project.repoUrl,
@@ -345,6 +469,61 @@ export function registerDeploy(program: Command): void {
           } else {
             success(`Redeploy queued: ${d.name || d.id}`);
             console.log(`  Repo: ${project.repoUrl}${project.gitBranch ? ` @ ${project.gitBranch}` : ''}`);
+            console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
+          }
+          return;
+        }
+
+        if (deployment.code) {
+          const payload: Record<string, any> = {
+            deploymentId: deployment.id,
+            projectId: deployment.projectId,
+            name: opts.name || `${deployment.name}-redeploy`,
+            displayName: opts.name || `Redeploy of ${deployment.displayName || deployment.name}`,
+            code: deployment.code,
+            dockerfile: deployment.dockerfile,
+            deploymentProvider: provider || deployment.provider,
+            environment: deployment.environment,
+            healthCheckEnabled: deployment.healthCheckEnabled,
+            healthCheckType: deployment.healthCheckType,
+            healthCheckUrl: deployment.healthCheckUrl,
+          };
+          if (hasAttachedServices) {
+            payload.services = deployment.services.map((service: any) => ({
+              type: service.serviceType,
+              displayName: service.displayName,
+            }));
+          }
+          if (Object.keys(baseEnvVars).length) payload.envVars = baseEnvVars;
+
+          const res = await client.post('/api/deployments', payload);
+          const d = unwrap(res.data);
+          if (opts.json) { printJson(d); return; }
+          if (opts.wait) {
+            await pollUntilDone(d.id, spinner(`Redeploying ${d.name || nameOrId}...`));
+          } else {
+            success(`Redeploy queued: ${d.name || d.id}`);
+            console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
+          }
+          return;
+        }
+
+        if (deployment.imageName && !isInternalDeploymentImage(deployment.imageName)) {
+          const payload: Record<string, any> = {
+            image: deployment.imageName,
+            port: deployment.port,
+            name: opts.name || `${deployment.name}-redeploy`,
+          };
+          if (provider) payload.provider = provider;
+          if (Object.keys(baseEnvVars).length) payload.envVars = baseEnvVars;
+
+          const res = await client.post('/api/gpt/deploy', payload);
+          const d = res.data;
+          if (opts.json) { printJson(d); return; }
+          if (opts.wait) {
+            await pollUntilDone(d.id, spinner(`Redeploying ${d.name || nameOrId}...`));
+          } else {
+            success(`Redeploy queued: ${d.name || d.id}`);
             console.log(`  Run 'nexus deploy status ${d.id} --watch' to track progress`);
           }
           return;
@@ -704,6 +883,7 @@ export function registerDeploy(program: Command): void {
           ['Provider', d.provider || '—'],
           ['URL', d.url || d.serviceUrl || '—'],
           ['Replicas', String(d.replicas ?? '—')],
+          ['Auto Destroy', formatAutoDestroy(d.autoDestroyAt)],
           ['Updated', d.updatedAt ? timeAgo(d.updatedAt) : '—'],
         ]);
       };
@@ -715,6 +895,55 @@ export function registerDeploy(program: Command): void {
           await new Promise((r) => setTimeout(r, 3000));
           try { await show(); } catch { /* ignore */ }
         }
+      } catch (err) {
+        errorMsg(apiError(err));
+        process.exit(1);
+      }
+    });
+
+  deploy
+    .command('auto-destroy <name-or-id>')
+    .description('Set, extend, reduce, or disable deployment auto-destroy without restarting the deployment')
+    .option('--in <duration>', 'Destroy after a relative duration, e.g. 30m, 4h, 2d')
+    .option('--at <iso-date>', 'Destroy at an absolute ISO timestamp')
+    .option('--off', 'Disable auto-destroy')
+    .option('--json', 'Output raw JSON')
+    .action(async (nameOrId, opts) => {
+      const selected = [opts.in, opts.at, opts.off].filter(Boolean);
+      if (selected.length !== 1) {
+        errorMsg('Choose exactly one of --in, --at, or --off');
+        process.exit(1);
+      }
+
+      try {
+        const deployment = await resolveDeployment(nameOrId);
+        const payload: Record<string, any> = {};
+
+        if (opts.off) {
+          payload.autoDestroyAt = null;
+        } else if (opts.in) {
+          payload.autoDestroyAt = parseDurationToDate(opts.in).toISOString();
+        } else if (opts.at) {
+          const date = new Date(opts.at);
+          if (Number.isNaN(date.getTime())) {
+            throw new Error(`Invalid ISO date: ${opts.at}`);
+          }
+          payload.autoDestroyAt = date.toISOString();
+        }
+
+        const res = await client.patch(`/api/deployments/${deployment.id}/auto-destroy`, payload);
+        const updated = unwrap(res.data);
+
+        if (opts.json) {
+          printJson(updated);
+          return;
+        }
+
+        success(
+          updated.autoDestroyAt
+            ? `Auto-destroy set for ${updated.displayName || updated.name}: ${formatAutoDestroy(updated.autoDestroyAt)}`
+            : `Auto-destroy disabled for ${updated.displayName || updated.name}`
+        );
       } catch (err) {
         errorMsg(apiError(err));
         process.exit(1);

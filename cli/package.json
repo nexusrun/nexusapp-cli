@@ -1,11 +1,16 @@
 {
   "name": "nexusapp-cli",
-  "version": "2.1.1",
+  "version": "4.1.5",
   "description": "NEXUS AI command-line interface",
   "main": "dist/index.js",
   "bin": {
     "nexus": "./bin/nexus"
   },
+  "files": [
+    "bin/",
+    "dist/",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
@@ -24,7 +29,6 @@
     "cli-table3": "^0.6.3",
     "commander": "^12.0.0",
     "inquirer": "^9.2.0",
-    "nexusapp-cli": "^2.1.1",
     "ora": "^8.0.0"
   },
   "devDependencies": {

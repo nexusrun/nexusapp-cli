@@ -3,7 +3,7 @@
 Deploy, manage, and monitor cloud applications from the terminal.
 
 ```
-npm install -g @nexusai/cli
+npm install -g nexusapp-cli@latest 
 nexus login
 nexus deploy source --repo https://github.com/you/app --name my-app --provider gcp_cloud_run
 ```
@@ -11,7 +11,7 @@ nexus deploy source --repo https://github.com/you/app --name my-app --provider g
 ## Installation
 
 ```bash
-npm install -g @nexusai/cli
+npm install -g nexusapp-cli@latest 
 ```
 
 Requires Node.js 18 or later.

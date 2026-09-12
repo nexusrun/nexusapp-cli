@@ -1,6 +1,14 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { getConfig } from './config.js';
 
+// In one-shot mode a fatal API error prints and exits the process. The shell
+// (repl) switches this off so a fatal error rejects normally and the session
+// survives instead of being torn down.
+let exitOnFatal = true;
+export function setReplMode(): void {
+  exitOnFatal = false;
+}
+
 function createClient(): AxiosInstance {
   const config = getConfig();
   const baseURL = config.apiUrl || 'https://nexusai.run';
@@ -19,26 +27,30 @@ function createClient(): AxiosInstance {
     return req;
   });
 
+  const fatal = (message: string, error: AxiosError): Promise<never> => {
+    if (exitOnFatal) {
+      console.error(message);
+      process.exit(1);
+    }
+    return Promise.reject(new Error(message));
+  };
+
   instance.interceptors.response.use(
     (res) => res,
     (error: AxiosError) => {
       if (!error.response) {
-        const url = baseURL;
-        console.error(`Cannot reach NEXUS AI API at ${url}.`);
-        process.exit(1);
+        return fatal(`Cannot reach NEXUS AI API at ${baseURL}.`, error);
       }
 
       const status = error.response.status;
       const data = error.response.data as any;
 
       if (status === 401) {
-        console.error("Session expired. Run 'nexus auth login'");
-        process.exit(1);
+        return fatal("Session expired. Run 'nexus auth login'", error);
       }
 
       if (status === 403) {
-        console.error(data?.message || data?.error || 'Access denied.');
-        process.exit(1);
+        return fatal(data?.message || data?.error || 'Access denied.', error);
       }
 
       return Promise.reject(error);
