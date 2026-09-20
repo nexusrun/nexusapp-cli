@@ -276,6 +276,7 @@ export function registerDeploy(program: Command): void {
     .description('Deploy from a Git repository')
     .requiredOption('--repo <url>', 'Git repository URL')
     .option('--name <name>', 'Deployment name')
+    .option('--project <id>', 'Project ID (deploy into a specific project instead of the shared default; use separate project IDs for dev/staging/prod deploys of the same repo so they do not overwrite each other)')
     .option('--branch <branch>', 'Git branch')
     .option('--provider <provider>', 'Provider (docker|gcp_cloud_run|aws_ecs_fargate|azure_container_apps)')
     .option('--region <region>', 'Cloud region to deploy into (e.g. us-central1, canadacentral)')
@@ -311,6 +312,7 @@ export function registerDeploy(program: Command): void {
       }
       const payload: Record<string, any> = { sourceType: 'repo', repoUrl: opts.repo };
       if (opts.name) payload.name = opts.name;
+      if (opts.project) payload.projectId = opts.project;
       if (opts.branch) payload.repoBranch = opts.branch;
       if (opts.provider) payload.provider = opts.provider;
       if (opts.region) payload.region = opts.region;

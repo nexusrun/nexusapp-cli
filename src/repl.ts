@@ -102,6 +102,45 @@ async function runCommand(buildProgram: () => Command, rawTokens: string[]): Pro
   }
 }
 
+/**
+ * Read exactly one line from a fresh readline interface, then resolve.
+ * The interface is NOT closed here — the caller closes it immediately after,
+ * before running whatever command the line names. That matters because some
+ * commands (e.g. `db backup-delete`) show their own inquirer confirmation
+ * prompt, which attaches its own listeners to stdin. A readline.Interface's
+ * keypress handling isn't actually suspended by `.pause()` on a TTY, so if
+ * ours were still alive while inquirer's prompt runs, it independently
+ * parses the same keystrokes and queues the typed answer (e.g. "y") as if it
+ * were the *next* shell command. Fully closing our interface first removes
+ * its stdin listeners entirely, so only inquirer's own prompt sees that
+ * input.
+ */
+function readLine(rl: readline.Interface): Promise<{ line: string | null; sigint: boolean }> {
+  return new Promise((resolve) => {
+    const onLine = (line: string) => {
+      cleanup();
+      resolve({ line, sigint: false });
+    };
+    const onSigint = () => {
+      cleanup();
+      resolve({ line: null, sigint: true });
+    };
+    const onClose = () => {
+      cleanup();
+      resolve({ line: null, sigint: false });
+    };
+    function cleanup() {
+      rl.removeListener('line', onLine);
+      rl.removeListener('SIGINT', onSigint);
+      rl.removeListener('close', onClose);
+    }
+    rl.once('line', onLine);
+    rl.once('SIGINT', onSigint);
+    rl.once('close', onClose);
+    rl.prompt();
+  });
+}
+
 export async function startRepl(buildProgram: () => Command): Promise<void> {
   console.log(
     ' Type a command (e.g. ' + chalk.cyan('deploy list') + '), ' +
@@ -109,46 +148,41 @@ export async function startRepl(buildProgram: () => Command): Promise<void> {
   );
   console.log('');
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: chalk.cyan('nexus') + chalk.dim(' › '),
-    completer: buildCompleter(buildProgram()),
-  });
-
-  let closed = false;
-  rl.on('close', () => { closed = true; });
-  const prompt = () => {
-    if (!closed) rl.prompt();
-  };
-
   setReplMode(); // fatal API errors reject instead of exiting the process
-  rl.on('SIGINT', () => rl.close()); // Ctrl-C leaves the shell cleanly
-  prompt();
 
-  // Iterating the interface yields one line at a time and only pulls the next
-  // after the loop body finishes, so commands run strictly one-at-a-time.
-  for await (const line of rl) {
-    const input = line.trim();
-    if (!input) {
-      prompt();
-      continue;
+  // A fresh readline.Interface per prompt cycle, closed the instant its one
+  // line is read — see readLine() for why this can't be a single long-lived
+  // interface shared with command execution.
+  for (;;) {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: chalk.cyan('nexus') + chalk.dim(' › '),
+      completer: buildCompleter(buildProgram()),
+    });
+
+    const { line, sigint } = await readLine(rl);
+    rl.close();
+
+    if (sigint || line === null) {
+      break; // Ctrl-C or Ctrl-D at the prompt leaves the shell cleanly
     }
+
+    const input = line.trim();
+    if (!input) continue;
+
     const lower = input.toLowerCase();
     if (lower === 'exit' || lower === 'quit' || lower === ':q') {
       break;
     }
     if (lower === 'clear' || lower === 'cls') {
       console.clear();
-      prompt();
       continue;
     }
 
     await runCommand(buildProgram, tokenize(lower === 'help' ? '--help' : input));
     console.log('');
-    prompt();
   }
 
-  if (!closed) rl.close();
   console.log(chalk.dim('Goodbye.'));
 }

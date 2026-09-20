@@ -8,6 +8,9 @@ let exitOnFatal = true;
 export function setReplMode(): void {
   exitOnFatal = false;
 }
+export function isReplMode(): boolean {
+  return !exitOnFatal;
+}
 
 function createClient(): AxiosInstance {
   const config = getConfig();

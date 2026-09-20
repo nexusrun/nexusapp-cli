@@ -1,6 +1,6 @@
 {
   "name": "nexusapp-cli",
-  "version": "4.1.5",
+  "version": "4.1.8",
   "description": "NEXUS AI command-line interface",
   "main": "dist/index.js",
   "bin": {
