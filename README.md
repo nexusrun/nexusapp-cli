@@ -18,7 +18,7 @@ nexus deploy source --repo https://github.com/you/app --name my-app --provider g
 npm install -g nexusapp-cli@latest
 ```
 
-Requires Node.js 18 or later. Run `nexus --help` and `nexus <command> --help` for the exact syntax of the version you have installed. A fuller reference lives in [`wiki/CLI.md`](../wiki/CLI.md).
+Requires Node.js 18 or later. Run `nexus --help` and `nexus <command> --help` for the exact syntax of the version you have installed.
 
 ## Authentication
 
