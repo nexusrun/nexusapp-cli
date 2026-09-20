@@ -2,6 +2,10 @@
 
 Deploy, manage, and monitor cloud applications from the terminal: deployments, standalone databases, storage, secrets, domains, and team access.
 
+[![NEXUS AI CLI demo](https://nexusai.run/videos/nexus-cli-demo.gif)](https://nexusai.run/videos/nexus-cli-demo.mp4)
+
+<sub>Autoplaying preview. [Watch the full-quality video](https://nexusai.run/videos/nexus-cli-demo.mp4).</sub>
+
 ```
 npm install -g nexusapp-cli@latest
 nexus auth login
